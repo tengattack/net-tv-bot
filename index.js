@@ -2,6 +2,7 @@
 
 const url = require('url')
 const request = require('request')
+const nodemailer = require('nodemailer')
 const config = require('./config')
 
 const cookiesJar = request.jar()
@@ -61,6 +62,35 @@ function getTableItem(tableHTML) {
     }
   }
   return items
+}
+
+function sendMail(subject, body) {
+  let transOpts = {
+    auth: {
+      user: config['mail'].username,
+      pass: config['mail'].password,
+    },
+  }
+  if (config['mail'].service) {
+    transOpts.service = config['mail'].service
+  } else {
+    transOpts = Object.assign(transOpts, config['mail'].smtp)
+  }
+  const transporter = nodemailer.createTransport(transOpts)
+
+  const mailOpts = {
+    from: config['mail'].sender, // sender address
+    to: config['mail'].receiver, // list of receivers
+    subject: subject, // Subject line
+    text: body, // plain text body
+  }
+
+  transporter.sendMail(mailOpts, (err, info) => {
+    if (error) {
+      return console.log(err)
+    }
+    console.log('Message %s sent: %s', info.messageId, info.response)
+  })
 }
 
 async function main() {
@@ -158,11 +188,21 @@ async function main() {
 main()
   .then(items => {
     const d = new Date()
-    console.log('登录成功 %s %s', d.toLocaleDateString(), d.toLocaleTimeString())
+    const title = '登录成功 ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString()
+    console.log(title)
+    let mailText = ''
     items.forEach(item => {
       console.log(item.join(','))
+      mailText += item.join(' ') + '\n'
     })
     console.log('')
+    sendMail(title, mailText)
+  })
+  .catch(err => {
+    console.log(err)
+    const d = new Date()
+    const title = '登录失败 ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString()
+    sendMail(title, err.toString())
   })
   .catch(err => {
     console.log(err)
