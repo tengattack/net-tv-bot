@@ -17,7 +17,7 @@ Logging every day automatically.
 
 ```shell
 crontab -e
-# add '35 9 * * * /path/to/node `pwd`/index.js'
+# add '35 9 * * * /path/to/node `pwd`/index.js >> `pwd`/net-tv-bot.csv'
 ```
 
 ## License
