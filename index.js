@@ -1,43 +1,38 @@
 'use strict'
 
 const url = require('url')
-const request = require('request')
+const axios = require('axios')
+const SocksProxyAgent = require('socks-proxy-agent')
+const axiosCookieJarSupport = require('axios-cookiejar-support').default
+const tough = require('tough-cookie')
 const nodemailer = require('nodemailer')
 const config = require('./config')
-
-const cookiesJar = request.jar()
 
 const DEFAULT_USERAGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393'
 const NET_TV_URL = 'http://net.tv.cn'
 
-function requestAsync(uri, opts) {
-  return new Promise((resolve, reject) => {
-    const headers = {
-      'User-Agent': config.userAgent || DEFAULT_USERAGENT
-    }
-    if (opts && opts.headers) {
-      const _headers = Object.assign({ headers }, opts.headers)
-      opts = Object.assign({
-        uri,
-        gzip: true,
-        jar: cookiesJar,
-      }, opts, { headers: _headers })
-    } else {
-      opts = Object.assign({
-        uri,
-        headers,
-        gzip: true,
-        jar: cookiesJar,
-      }, opts)
-    }
-    request(opts, function (err, resp, body) {
-      if (err) {
-        reject(err)
-        return
-      }
-      resolve([ resp, body ])
-    })
-  })
+let client
+if (config['http'] && config['http'].socksProxy) {
+  // create the socksAgent for axios
+  const httpAgent = new SocksProxyAgent(config['http'].socksProxy)
+  client = axios.create({ withCredentials: true, httpAgent, httpsAgent: httpAgent })
+} else {
+  client = axios.create({ withCredentials: true })
+}
+const cookieJar = new tough.CookieJar()
+// Set directly after wrapping instance.
+axiosCookieJarSupport(client)
+client.defaults.jar = cookieJar
+
+async function requestAsync(uri, opts) {
+  const headers = {
+    'User-Agent': config.userAgent || DEFAULT_USERAGENT
+  }
+  if (opts && opts.headers) {
+    const _headers = Object.assign({ headers }, opts.headers)
+    opts = Object.assign({}, opts, { headers: _headers })
+  }
+  return await client.get(uri, opts)
 }
 
 function checkUrl(_url) {
@@ -101,13 +96,13 @@ async function main() {
 
   let _url = NET_TV_URL + '/'
   let r = await requestAsync(_url)
-  if (!r || !r[1].includes('<frame src="main.jsp"')) {
+  if (!r || !r.data.includes('<frame src="main.jsp"')) {
     throw new Error('failed to open homepage')
   }
 
   let nextUrl = NET_TV_URL + '/right/loginForm.jsp'
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r[1].includes('loginExcute.jsp"')) {
+  if (!r || !r.data.includes('loginExcute.jsp"')) {
     throw new Error('failed to open login form')
   }
 
@@ -115,10 +110,12 @@ async function main() {
   nextUrl = NET_TV_URL + '/right/loginExcute.jsp'
   const qs = { pmail: account['username'], pcode: account['password'] }
   r = await requestAsync(nextUrl,
-    { qs, useQuerystring: true, followRedirect: false, headers: { Referer: _url } })
+    { params: qs, maxRedirects: 0, headers: { Referer: _url }, validateStatus: function (status) {
+        return status >= 200 && status < 400
+      }, })
   if (r) {
-    if (r[0].statusCode !== 302) {
-      const m = r[1].match(/<font color="red".*?>(.*?)<\/font>/i)
+    if (r.status !== 302) {
+      const m = r.data.match(/<font color="red".*?>(.*?)<\/font>/i)
       if (m) {
         throw new Error(m[1])
       } else {
@@ -130,7 +127,7 @@ async function main() {
       throw new Error('no set cookie')
     }*/
 
-    const location = r[0].headers['location']
+    const location = r.headers['location']
     const path = checkUrl(location)
     if (!path) {
       throw new Error('redirect hostname error')
@@ -141,20 +138,20 @@ async function main() {
   }
 
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r[1]) {
+  if (!r || !r.data) {
     throw new Error('failed to open logged homepage')
   }
 
   _url = nextUrl
   nextUrl = NET_TV_URL + '/top.jsp'
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r[1]) {
+  if (!r || !r.data) {
     throw new Error('failed to open logged top frame')
   }
-  if (!r[1].includes('/personnel/MyInfoIndex.jsp"')) {
+  if (!r.data.includes('/personnel/MyInfoIndex.jsp"')) {
     throw new Error('failed to logged in')
   }
-  let m = r[1].match(/<a href="(.*?)".*?>违规节目<\/a>/i)
+  let m = r.data.match(/<a href="(.*?)".*?>违规节目<\/a>/i)
   if (!m) {
     throw new Error('failed to get illegal program link')
   }
@@ -165,19 +162,19 @@ async function main() {
 
   nextUrl = NET_TV_URL + '/main.jsp'
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r[1]) {
+  if (!r || !r.data) {
     throw new Error('failed to open logged main frame')
   }
-  if (r[1].includes('/right/loginForm.jsp"')) {
+  if (r.data.includes('/right/loginForm.jsp"')) {
     throw new Error('failed to logged in')
   }
 
   nextUrl = NET_TV_URL + nextUrl2
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r[1]) {
+  if (!r || !r.data) {
     throw new Error('failed to open illegal program frame')
   }
-  m = r[1].match(/<table .*?>([\s\S]*?)<\/table>/i)
+  m = r.data.match(/<table .*?>([\s\S]*?)<\/table>/i)
   if (!m) {
     throw new Error('failed to get illegal program table')
   }
