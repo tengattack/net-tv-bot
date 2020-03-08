@@ -59,6 +59,24 @@ function getTableItem(tableHTML) {
   return items
 }
 
+function ii(s, len = 2, pad = '0') {
+  s = s.toString()
+  while (s.length < len) {
+    s = pad + s
+  }
+  return s
+}
+
+/**
+ * Format date to string
+ *
+ * @param {Date} d
+ * @return {String} eg. '2019-08-04'
+ */
+function formatDateTime(d) {
+  return `${d.getFullYear()}-${ii(d.getMonth() + 1)}-${ii(d.getDate())} ${ii(d.getHours())}:${ii(d.getMinutes())}:${ii(d.getSeconds())}`
+}
+
 function sendMail(subject, body) {
   let transOpts = {
     auth: {
@@ -185,7 +203,7 @@ async function main() {
 main()
   .then(items => {
     const d = new Date()
-    const title = '登录成功 ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString()
+    const title = '登录成功 ' + formatDateTime(d)
     console.log(title)
     let mailText = ''
     items.forEach(item => {
@@ -198,7 +216,7 @@ main()
   .catch(err => {
     console.log(err)
     const d = new Date()
-    const title = '登录失败 ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString()
+    const title = '登录失败 ' + formatDateTime(d)
     sendMail(title, err.toString())
   })
   .catch(err => {
