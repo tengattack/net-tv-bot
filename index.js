@@ -43,7 +43,11 @@ function checkUrl(_url) {
   return up.path
 }
 
-function getTableItem(tableHTML) {
+function trimHtml(content) {
+  return content.replace(/<.*?>/g, '').trim()
+}
+
+function getIllegalProgramItems(tableHTML) {
   const m = tableHTML.match(/<tr.*?>([\s\S]*?)<\/tr>/ig)
   if (!m) {
     throw new Error('failed to list row')
@@ -52,7 +56,23 @@ function getTableItem(tableHTML) {
   for (const trHTML of m) {
     const mt = trHTML.match(/<(t[hd]).*?>([\s\S]*?)<\/\1>/ig)
     if (mt) {
-      const s = mt.map(content => content.replace(/<.*?>/g, '').trim())
+      const s = mt.map(trimHtml)
+      items.push(s)
+    }
+  }
+  return items
+}
+
+function getManageNewsList(listHTML) {
+  const m = listHTML.match(/<li.*?>([\s\S]*?)<\/li>/ig)
+  if (!m) {
+    throw new Error('failed to list row')
+  }
+  const items = []
+  for (const liHTML of m) {
+    const mt = liHTML.match(/<a\s.*?>([\s\S]*?)<\/a>([\s\S]*)<\/li>/i)
+    if (mt) {
+      const s = [ trimHtml(mt[2]), trimHtml(mt[1]) ]
       items.push(s)
     }
   }
@@ -177,15 +197,21 @@ async function main() {
   if (!nextUrl2) {
     throw new Error('failed to match illegal program link')
   }
+  m = r.data.match(/<a href="(.*?)".*?>管理动态<\/a>/i)
+  let nextUrl3 = checkUrl(m[1])
+  if (!nextUrl3) {
+    throw new Error('failed to match manage news link')
+  }
 
-  nextUrl = NET_TV_URL + '/main.jsp'
+  // REMOVE FOR SERVER INTERNAL ERROR AND NOT NECESSARY
+  /*nextUrl = NET_TV_URL + '/main.jsp'
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
   if (!r || !r.data) {
     throw new Error('failed to open logged main frame')
   }
   if (r.data.includes('/right/loginForm.jsp"')) {
     throw new Error('failed to logged in')
-  }
+  }*/
 
   nextUrl = NET_TV_URL + nextUrl2
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
@@ -196,24 +222,48 @@ async function main() {
   if (!m) {
     throw new Error('failed to get illegal program table')
   }
+  const illegalPrograms = getIllegalProgramItems(m[1])
 
-  return getTableItem(m[1])
+  nextUrl = NET_TV_URL + nextUrl3
+  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
+  if (!r || !r.data) {
+    throw new Error('failed to open manage news frame')
+  }
+  m = r.data.match(/<ul class="title_list">([\s\S]*?)<\/ul>/i)
+  if (!m) {
+    throw new Error('failed to get manage news list')
+  }
+  const manageNews = getManageNewsList(m[1])
+
+  return {
+    illegalPrograms,
+    manageNews,
+  }
 }
 
 main()
-  .then(items => {
+  .then((result) => {
     const d = new Date()
     const title = '登录成功 ' + formatDateTime(d)
-    console.log(title)
-    let mailText = ''
-    items.forEach(item => {
+    let subTitle = '违规节目：'
+    console.log(title + '\n\n' + subTitle)
+    let mailText = subTitle + '\n'
+    result.illegalPrograms.forEach(item => {
+      console.log(item.join(','))
+      mailText += item.join(' ') + '\n'
+    })
+
+    subTitle = '\n管理动态：'
+    console.log(subTitle)
+    mailText += subTitle + '\n'
+    result.manageNews.forEach(item => {
       console.log(item.join(','))
       mailText += item.join(' ') + '\n'
     })
     console.log('')
     sendMail(title, mailText)
   })
-  .catch(err => {
+  .catch((err) => {
     console.log(err)
     const d = new Date()
     const title = '登录失败 ' + formatDateTime(d)
