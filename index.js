@@ -1,15 +1,23 @@
 'use strict'
 
+const path = require('path')
 const url = require('url')
 const axios = require('axios')
 const SocksProxyAgent = require('socks-proxy-agent')
 const axiosCookieJarSupport = require('axios-cookiejar-support').default
 const tough = require('tough-cookie')
 const nodemailer = require('nodemailer')
-const config = require('./config')
 
 const DEFAULT_USERAGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393'
 const NET_TV_URL = 'http://net.tv.cn'
+
+let configFile = process.argv[2]
+if (!configFile) {
+  console.log('Please specify config file')
+  process.exit(1)
+}
+configFile = path.join(process.cwd(), configFile)
+const config = require(configFile)
 
 let client
 if (config['http'] && config['http'].socksProxy) {
