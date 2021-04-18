@@ -11,6 +11,9 @@ module.exports = {
     sender: '',
     receiver: '',
   },
+  tesseract: {
+    command: 'tesseract',
+  },
   // userAgent: 'custom User-Agent',
   // http: {
   //   socksProxy: 'socks5://127.0.0.1:1080',

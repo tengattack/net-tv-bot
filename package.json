@@ -1,6 +1,6 @@
 {
   "name": "net-tv-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A bot for fetching information from net.tv.cn",
   "main": "index.js",
   "scripts": {
@@ -18,9 +18,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "axios": "^0.19.0",
-    "axios-cookiejar-support": "^0.5.0",
+    "axios": "^0.21.1",
+    "axios-cookiejar-support": "^1.0.1",
     "nodemailer": "^4.0.1",
+    "qs": "^6.10.1",
     "socks-proxy-agent": "^4.0.2",
     "tough-cookie": "^3.0.1"
   }

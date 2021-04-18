@@ -1,8 +1,12 @@
 'use strict'
 
+const { spawn } = require('child_process')
+const fs = require('fs')
 const path = require('path')
-const url = require('url')
+const { URL } = require('url')
+
 const axios = require('axios')
+const qs = require('qs')
 const SocksProxyAgent = require('socks-proxy-agent')
 const axiosCookieJarSupport = require('axios-cookiejar-support').default
 const tough = require('tough-cookie')
@@ -40,11 +44,27 @@ async function requestAsync(uri, opts) {
     const _headers = Object.assign({ headers }, opts.headers)
     opts = Object.assign({}, opts, { headers: _headers })
   }
-  return await client.get(uri, opts)
+  if (opts && opts.data) {
+    opts.data = qs.stringify(opts.data)
+  }
+  if (!opts) {
+    opts = {}
+  }
+  opts.url = uri
+  return await client(opts)
 }
 
 function checkUrl(_url) {
-  const up = url.parse(_url)
+  if (_url.startsWith('/')) {
+    return _url
+  }
+  if (_url.startsWith('./')) {
+    return _url.substr(1)
+  }
+  if (!/^https?:\/\//.test(_url)) {
+    return '/' + _url
+  }
+  const up = new URL(_url)
   if (up.hostname && !NET_TV_URL.includes(up.hostname.toLowerCase())) {
     return null
   }
@@ -52,39 +72,25 @@ function checkUrl(_url) {
 }
 
 function trimHtml(content) {
+  if (!content) {
+    return ''
+  }
   return content.replace(/<.*?>/g, '').trim()
 }
 
-function getIllegalProgramItems(tableHTML) {
-  const m = tableHTML.match(/<tr.*?>([\s\S]*?)<\/tr>/ig)
-  if (!m) {
-    throw new Error('failed to list row')
+function getRootItems(callbackName, jsonpData) {
+  const startPrefix = callbackName + '('
+  let startPos = jsonpData.indexOf(startPrefix)
+  if (startPos < 0) {
+    throw new Error('failed to valid jsonp data')
   }
-  const items = []
-  for (const trHTML of m) {
-    const mt = trHTML.match(/<(t[hd]).*?>([\s\S]*?)<\/\1>/ig)
-    if (mt) {
-      const s = mt.map(trimHtml)
-      items.push(s)
-    }
+  startPos += startPrefix.length
+  const endPos = jsonpData.lastIndexOf(')')
+  if (endPos < 0) {
+    throw new Error('failed to valid jsonp data')
   }
-  return items
-}
-
-function getManageNewsList(listHTML) {
-  const m = listHTML.match(/<li.*?>([\s\S]*?)<\/li>/ig)
-  if (!m) {
-    throw new Error('failed to list row')
-  }
-  const items = []
-  for (const liHTML of m) {
-    const mt = liHTML.match(/<a\s.*?>([\s\S]*?)<\/a>([\s\S]*)<\/li>/i)
-    if (mt) {
-      const s = [ trimHtml(mt[2]), trimHtml(mt[1]) ]
-      items.push(s)
-    }
-  }
-  return items
+  const data = JSON.parse(jsonpData.substr(startPos, endPos - startPos))
+  return data.root
 }
 
 function ii(s, len = 2, pad = '0') {
@@ -134,6 +140,33 @@ function sendMail(subject, body) {
   })
 }
 
+function ocrImage(imageFilePath) {
+  return new Promise((resolve, reject) => {
+    const tesseract = spawn(config.tesseract.command, [imageFilePath, 'stdout', '--psm', '6', '--dpi', '70'])
+    let stdout = '', stderr = ''
+        tesseract.stdout.on('data', function (data) {
+          stdout += data
+        })
+        tesseract.stderr.on('data', function (data) {
+          stderr += data
+        })
+        tesseract.on('close', function (code) {
+          fs.unlink(imageFilePath, function (err) {
+            if (err) {
+              console.error('unlink png error:', err)
+            }
+          })
+          if (code !== 0) {
+            // error
+            reject(new Error(stderr))
+            return
+          }
+          stdout = stdout.substr(0, stdout.length - 1).trim().replace(/ /g, '')
+          resolve(stdout)
+        })
+  })
+}
+
 async function main() {
   const account = config.account
   if (!account || !account['username'] || !account['password']) {
@@ -142,62 +175,92 @@ async function main() {
 
   let _url = NET_TV_URL + '/'
   let r = await requestAsync(_url)
-  if (!r || !r.data.includes('<frame src="main.jsp"')) {
+  if (!r || !r.data.includes('<img id="codeId"')) {
     throw new Error('failed to open homepage')
   }
 
-  let nextUrl = NET_TV_URL + '/right/loginForm.jsp'
-  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r.data.includes('loginExcute.jsp"')) {
-    throw new Error('failed to open login form')
-  }
+  let nextUrl = ''
+  const maxRetries = 3
 
-  _url = nextUrl
-  nextUrl = NET_TV_URL + '/right/loginExcute.jsp'
-  const qs = { pmail: account['username'], pcode: account['password'] }
-  r = await requestAsync(nextUrl,
-    { params: qs, maxRedirects: 0, headers: { Referer: _url }, validateStatus: function (status) {
-        return status >= 200 && status < 400
-      }, })
-  if (r) {
-    if (r.status !== 302) {
-      const m = r.data.match(/<font color="red".*?>(.*?)<\/font>/i)
-      if (m) {
-        throw new Error(m[1])
-      } else {
-        throw new Error('unknown error')
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      nextUrl = NET_TV_URL + '/kaptcha.jpg'
+      // captcha
+      r = await requestAsync(nextUrl, { headers: { Referer: _url }, responseType: 'arraybuffer' })
+      if (!r) {
+        throw new Error('failed to get captcha image')
       }
-    }
-    /* jar controlled
-    if (!r[0].headers['set-cookie']) {
-      throw new Error('no set cookie')
-    }*/
 
-    const location = r.headers['location']
-    const path = checkUrl(location)
-    if (!path) {
-      throw new Error('redirect hostname error')
-    }
+      let vcode = ''
+      try {
+        const imageFilePath = 'kaptcha-' + Date.now() + '.jpg'
+        fs.writeFileSync(imageFilePath, r.data)
+        vcode = await ocrImage(imageFilePath)
+      } catch (e) {
+        throw e
+      }
 
-    // no need to update referer when redirect
-    nextUrl = NET_TV_URL + path
+      nextUrl = NET_TV_URL + '/login.do'
+      const qs = {
+        systemId: 'three',
+        method: 'doLogin',
+        username: account['username'],
+        password: account['password'],
+        code: vcode,
+        CNNAME: '',
+        msg: '',
+      }
+      r = await requestAsync(nextUrl,
+        { method: 'POST', data: qs, maxRedirects: 0, headers: { Referer: _url }, validateStatus: function (status) {
+            return status >= 200 && status < 400
+          }, })
+      if (r) {
+        if (r.status !== 302) {
+          const m = r.data.match(/<span style="color:red;.*?>(.*?)<\/span>/i)
+          if (m) {
+            throw new Error(m[1])
+          } else {
+            throw new Error('unknown error')
+          }
+        }
+        /* jar controlled
+        if (!r[0].headers['set-cookie']) {
+          throw new Error('no set cookie')
+        }*/
+
+        const location = r.headers['location']
+        const path = checkUrl(location)
+        if (!path) {
+          throw new Error('redirect hostname error')
+        }
+
+        // no need to update referer when redirect
+        nextUrl = NET_TV_URL + path
+      }
+      break
+    } catch (e) {
+      if (e.message.includes('验证码错误') && i + 1 < maxRetries) {
+        console.log('重试：' + e.message)
+        continue
+      }
+      throw e
+    }
   }
 
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
   if (!r || !r.data) {
     throw new Error('failed to open logged homepage')
   }
-
   _url = nextUrl
-  nextUrl = NET_TV_URL + '/top.jsp'
-  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r.data) {
-    throw new Error('failed to open logged top frame')
+
+  // ajax get messages
+  nextUrl = NET_TV_URL + '/messageManageController.do?method=getMess'
+  const r2 = await requestAsync(nextUrl, { method: 'POST', headers: { Referer: _url } })
+  if (!r2) {
+    throw new Error('failed to get ajax message num')
   }
-  if (!r.data.includes('/personnel/MyInfoIndex.jsp"')) {
-    throw new Error('failed to logged in')
-  }
-  let m = r.data.match(/<a href="(.*?)".*?>违规节目<\/a>/i)
+
+  let m = r.data.match(/<a href="(.*?)"[^>]*?>违规节目<\/a>/i)
   if (!m) {
     throw new Error('failed to get illegal program link')
   }
@@ -205,21 +268,11 @@ async function main() {
   if (!nextUrl2) {
     throw new Error('failed to match illegal program link')
   }
-  m = r.data.match(/<a href="(.*?)".*?>管理动态<\/a>/i)
+  m = r.data.match(/<a href="(.*?)"[^>]*?>最新公告<\/a>/i)
   let nextUrl3 = checkUrl(m[1])
   if (!nextUrl3) {
     throw new Error('failed to match manage news link')
   }
-
-  // REMOVE FOR SERVER INTERNAL ERROR AND NOT NECESSARY
-  /*nextUrl = NET_TV_URL + '/main.jsp'
-  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
-  if (!r || !r.data) {
-    throw new Error('failed to open logged main frame')
-  }
-  if (r.data.includes('/right/loginForm.jsp"')) {
-    throw new Error('failed to logged in')
-  }*/
 
   nextUrl = NET_TV_URL + nextUrl2
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
@@ -230,18 +283,28 @@ async function main() {
   if (!m) {
     throw new Error('failed to get illegal program table')
   }
-  const illegalPrograms = getIllegalProgramItems(m[1])
+  _url = nextUrl
+
+  nextUrl = NET_TV_URL + '/programStoreController.do?method=listByArg&start=0&limit=50&keyWord=&isAll=keyWord&uploadDeptName=&startTime=&endTime=&programRroprety=&illegalReason=&programType=1&_dc=1618727117435&callback=stcCallback1001'
+  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
+  if (!r || !r.data) {
+    throw new Error('failed to list illegal program data')
+  }
+  const illegalPrograms = getRootItems('stcCallback1001', r.data)
 
   nextUrl = NET_TV_URL + nextUrl3
   r = await requestAsync(nextUrl, { headers: { Referer: _url } })
   if (!r || !r.data) {
     throw new Error('failed to open manage news frame')
   }
-  m = r.data.match(/<ul class="title_list">([\s\S]*?)<\/ul>/i)
-  if (!m) {
-    throw new Error('failed to get manage news list')
+  _url = nextUrl
+
+  nextUrl = NET_TV_URL + '/messageManageController.do?method=list&userId=698&start=0&limit=50&messageTitle=&messageType=&inceptObj=&startTime=&endTime=&_dc=1618727704960&callback=stcCallback1001'
+  r = await requestAsync(nextUrl, { headers: { Referer: _url } })
+  if (!r || !r.data) {
+    throw new Error('failed to list illegal program data')
   }
-  const manageNews = getManageNewsList(m[1])
+  const manageNews = getRootItems('stcCallback1001', r.data)
 
   return {
     illegalPrograms,
@@ -256,17 +319,25 @@ main()
     let subTitle = '违规节目：'
     console.log(title + '\n\n' + subTitle)
     let mailText = subTitle + '\n'
-    result.illegalPrograms.forEach(item => {
-      console.log(item.join(','))
-      mailText += item.join(' ') + '\n'
+    let line = '序号 上传时间 节目名称 违规原因'
+    console.log(line)
+    mailText += line + '\n'
+    result.illegalPrograms.forEach((item, i) => {
+      line = `${i + 1} ${item.insertTime} ${trimHtml(item.programName)} ${trimHtml(item.auditIdea)}`
+      console.log(line)
+      mailText += line + '\n'
     })
 
-    subTitle = '\n管理动态：'
+    subTitle = '\n最新公告：'
     console.log(subTitle)
     mailText += subTitle + '\n'
-    result.manageNews.forEach(item => {
-      console.log(item.join(','))
-      mailText += item.join(' ') + '\n'
+    line = '序号 日期 标题'
+    console.log(line)
+    mailText += line + '\n'
+    result.manageNews.forEach((item, i) => {
+      line = `${i + 1} ${item.sendTime} ${trimHtml(item.messageTitle)}`
+      console.log(line)
+      mailText += line + '\n'
     })
     console.log('')
     sendMail(title, mailText)
